@@ -1,0 +1,62 @@
+name: HP Watcher
+
+on:
+  schedule:
+    # alle 30 Minuten, bewusst nicht auf :00/:30 (dann ist bei GitHub weniger los)
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "Testlauf (Diagnose, schickt Zusammenfassung per Telegram, kein Alarm)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write   # state.json zurück ins Repo committen
+  actions: write    # Workflow nach der Meldung selbst deaktivieren
+
+concurrency:
+  group: hp-watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Abhängigkeiten installieren
+        run: pip install requests
+
+      - name: HP-Seiten prüfen
+        id: check
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python watch.py ${{ github.event.inputs.test == 'true' && '--test' || '' }}
+
+      - name: HTML-Dump hochladen (nur Testlauf)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: html-dump
+          path: page_*.html
+          if-no-files-found: ignore
+
+      - name: Zustand speichern
+        run: |
+          git config user.name "hp-watcher"
+          git config user.email "hp-watcher@users.noreply.github.com"
+          git add state.json
+          git diff --cached --quiet || (git commit -m "Update state" && git push)
+
+      - name: Workflow deaktivieren, wenn alles gemeldet wurde
+        if: steps.check.outputs.all_done == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow disable watch.yml
